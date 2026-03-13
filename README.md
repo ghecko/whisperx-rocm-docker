@@ -9,10 +9,9 @@ Running WhisperX on modern AMD hardware natively is notoriously difficult due to
 - **CTranslate2**: Requires a custom source build specifying the HIP C++ compiler to allow the transcription engine to run natively on AMD GPUs with `float16`/`float32` precision.
 
 ## The Solution
-This repository builds a Docker container from `rocm/pytorch:rocm7.2_ubuntu24.04_py3.12_pytorch_release_2.7.1` that elegantly sidesteps these issues:
+This repository builds a Docker container from `rocm/pytorch:rocm7.2_ubuntu24.04_py3.12_pytorch_release_2.10.0` that elegantly sidesteps these issues:
 1. **CTranslate2 Compilation**: Builds a custom wheel directly from source linking against ROCm/HIP.
-2. **Two-Stage Dependency Transplant**: Installs all required dependencies against ROCm PyTorch 2.7.1 natively, and then performs a forceful decoupled replacement of the `pyannote.audio` codebase to `4.0.4+` via `--no-deps`.
-3. **Source Patching**: Employs targeted `sed` patching directly against the WhisperX and Pyannote Python source files inside the container to gracefully bypass deprecated initialization parameters (like `plda`) and token arguments.
+2. **Dependency Resolution via Constraints**: Dynamically extracts the internal PyTorch ecosystem versions provided by the base ROCm image into `constraints.txt`. This forces `pip install` to cleanly link powerful utilities like `pyannote.audio>=4.0.0` natively against the existing ROCm torch installation instead of blindly pulling CUDA torch from PyPI.
 
 ## Dependencies & Acknowledgments
 - **WhisperX**: [m-bain/whisperX](https://github.com/m-bain/whisperX)

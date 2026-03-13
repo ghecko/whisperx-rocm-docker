@@ -44,7 +44,7 @@ RUN cd /src/CTranslate2/python && \
     CTRANSLATE2_ROOT=/opt/ctranslate2 python3 setup.py bdist_wheel --dist-dir /opt/wheels
 
 # Stage 2: Final Runtime
-FROM rocm/pytorch:rocm7.2_ubuntu24.04_py3.12_pytorch_release_2.7.1
+FROM rocm/pytorch:rocm7.2_ubuntu24.04_py3.12_pytorch_release_2.10.0
 
 ENV DEBIAN_FRONTEND=noninteractive
 # Install OpenBLAS and system libraries paralin recommends
@@ -60,7 +60,7 @@ COPY --from=builder /opt/ctranslate2 /opt/ctranslate2
 COPY --from=builder /opt/wheels /opt/wheels
 
 # 1. Install NumPy 2.1+ and your custom-built CTranslate2 wheel
-# 2. Use the system torch but re-verify the environment
+# 2. Prevent pip from pulling CUDA PyTorch from PyPI by pinning ROCm ecosystem versions
 RUN /opt/venv/bin/python3 -c "import torch; print(f'torch=={torch.__version__.split(\"+\")[0]}')" > /opt/constraints.txt && \
     /opt/venv/bin/python3 -c "import torchvision; print(f'torchvision=={torchvision.__version__.split(\"+\")[0]}')" >> /opt/constraints.txt && \
     /opt/venv/bin/python3 -c "import torchaudio; print(f'torchaudio=={torchaudio.__version__.split(\"+\")[0]}')" >> /opt/constraints.txt && \
@@ -69,18 +69,12 @@ RUN /opt/venv/bin/python3 -c "import torch; print(f'torch=={torch.__version__.sp
     /opt/venv/bin/python3 -m pip install -c /opt/constraints.txt --no-cache-dir \
     transformers>=4.48.0 \
     accelerate \
-    pyannote.audio==3.3.1 \
+    "pyannote.audio>=4.0.0" \
     onnxruntime-rocm \
     nltk \
     faster-whisper \
-    omegaconf opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp pyannoteai-sdk matplotlib && \
-    /opt/venv/bin/python3 -m pip install "pyannote.audio>=4.0.4" --no-deps --no-cache-dir && \
-    /opt/venv/bin/python3 -m pip install -c /opt/constraints.txt --no-cache-dir --no-deps \
-    git+https://github.com/m-bain/whisperX.git && \
-    sed -i 's/weights_only=weights_only/weights_only=False/g' /opt/venv/lib/python3.12/site-packages/lightning_fabric/utilities/cloud_io.py && \
-    sed -i "s/self.model = Pipeline.from_pretrained(model_config, token=token, cache_dir=cache_dir).to(device)/import os\n        if token:\n            os.environ['HF_TOKEN'] = token\n        self.model = Pipeline.from_pretrained(model_config, cache_dir=cache_dir).to(device)/g" /opt/venv/lib/python3.12/site-packages/whisperx/diarize.py && \
-    sed -i 's/token=token,/ /g' /opt/venv/lib/python3.12/site-packages/whisperx/vads/pyannote.py && \
-    sed -i "s/cache_dir: Union\[Path, Text, None\] = None,/cache_dir: Union\[Path, Text, None\] = None, \*\*kwargs,/g" /opt/venv/lib/python3.12/site-packages/pyannote/audio/pipelines/speaker_diarization.py
+    omegaconf \
+    git+https://github.com/m-bain/whisperX.git
 
 # Environment Tuning for Strix Halo (gfx1151)
 ENV HSA_OVERRIDE_GFX_VERSION=11.5.1
