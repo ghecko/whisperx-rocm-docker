@@ -1,0 +1,9 @@
+# Ignore data directories, but keep the directory structure
+audio/*
+!audio/.gitkeep
+
+cache/*
+!cache/.gitkeep
+
+output/*
+!output/.gitkeep

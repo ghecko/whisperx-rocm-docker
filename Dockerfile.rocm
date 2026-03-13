@@ -1,0 +1,92 @@
+# Stage 1: Builder
+FROM rocm/dev-ubuntu-24.04:7.2 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-/usr/local/lib}
+
+# Added libnuma-dev which is often required by newer rocBLAS/HIP versions
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    rocm-hip-runtime-dev hipblas-dev hipcub-dev hiprand-dev \
+    rocprim-dev rocrand-dev rocthrust-dev python3-dev python3-pip \
+    wget git libomp-dev build-essential cmake pkg-config libnuma-dev && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+# 1. Build & Install oneDNN
+ENV ONEDNN_VERSION=3.11
+RUN wget -q https://github.com/uxlfoundation/oneDNN/archive/refs/tags/v${ONEDNN_VERSION}.tar.gz -O onednn.tar.gz && \
+    tar xf onednn.tar.gz && cd oneDNN-${ONEDNN_VERSION} && \
+    cmake -DCMAKE_BUILD_TYPE=Release -DONEDNN_LIBRARY_TYPE=STATIC \
+          -DONEDNN_BUILD_EXAMPLES=OFF -DONEDNN_BUILD_TESTS=OFF \
+          -DONEDNN_ENABLE_WORKLOAD=INFERENCE -DONEDNN_RUNTIME=OMP . && \
+    make -j$(nproc) install
+
+# 2. Build CTranslate2 (Explicitly forcing HIPCC as the compiler)
+RUN git clone --recursive https://github.com/OpenNMT/CTranslate2.git && \
+    cd CTranslate2 && mkdir build && cd build && \
+    # We force the CXX compiler to hipcc so it recognizes 'hip' language extensions
+    cmake -DCMAKE_CXX_COMPILER=/opt/rocm/bin/hipcc \
+          -DCMAKE_C_COMPILER=/opt/rocm/bin/amdclang \
+          -DWITH_MKL=OFF \
+          -DWITH_DNNL=ON \
+          -DWITH_HIP=ON \
+          -DOPENMP_RUNTIME=COMP \
+          -DCMAKE_HIP_ARCHITECTURES="gfx1151" \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX=/opt/ctranslate2 .. && \
+    make -j$(nproc) install
+
+# 3. Build Python Wheel
+RUN apt-get update && apt-get install -y python3-pip python3-dev
+RUN pip install --break-system-packages pybind11 setuptools wheel
+RUN cd /src/CTranslate2/python && \
+    CTRANSLATE2_ROOT=/opt/ctranslate2 python3 setup.py bdist_wheel --dist-dir /opt/wheels
+
+# Stage 2: Final Runtime
+FROM rocm/pytorch:rocm7.2_ubuntu24.04_py3.12_pytorch_release_2.7.1
+
+ENV DEBIAN_FRONTEND=noninteractive
+# Install OpenBLAS and system libraries paralin recommends
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg git libnuma1 libopenblas-dev && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# CRITICAL: Force system ROCm libraries over PyTorch's internal ones and include CTranslate2 libs
+ENV LD_LIBRARY_PATH=/opt/ctranslate2/lib:/opt/rocm/lib:/opt/rocm/lib/llvm/lib:/usr/local/lib:$LD_LIBRARY_PATH
+ENV CTRANSLATE2_ROOT=/opt/ctranslate2
+
+COPY --from=builder /opt/ctranslate2 /opt/ctranslate2
+COPY --from=builder /opt/wheels /opt/wheels
+
+# 1. Install NumPy 2.1+ and your custom-built CTranslate2 wheel
+# 2. Use the system torch but re-verify the environment
+RUN /opt/venv/bin/python3 -c "import torch; print(f'torch=={torch.__version__.split(\"+\")[0]}')" > /opt/constraints.txt && \
+    /opt/venv/bin/python3 -c "import torchvision; print(f'torchvision=={torchvision.__version__.split(\"+\")[0]}')" >> /opt/constraints.txt && \
+    /opt/venv/bin/python3 -c "import torchaudio; print(f'torchaudio=={torchaudio.__version__.split(\"+\")[0]}')" >> /opt/constraints.txt && \
+    /opt/venv/bin/python3 -m pip install -c /opt/constraints.txt --no-cache-dir "numpy>=2.1.0" && \
+    /opt/venv/bin/python3 -m pip install -c /opt/constraints.txt --no-cache-dir /opt/wheels/*.whl && \
+    /opt/venv/bin/python3 -m pip install -c /opt/constraints.txt --no-cache-dir \
+    transformers>=4.48.0 \
+    accelerate \
+    pyannote.audio==3.3.1 \
+    onnxruntime-rocm \
+    nltk \
+    faster-whisper \
+    omegaconf opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp pyannoteai-sdk matplotlib && \
+    /opt/venv/bin/python3 -m pip install "pyannote.audio>=4.0.4" --no-deps --no-cache-dir && \
+    /opt/venv/bin/python3 -m pip install -c /opt/constraints.txt --no-cache-dir --no-deps \
+    git+https://github.com/m-bain/whisperX.git && \
+    sed -i 's/weights_only=weights_only/weights_only=False/g' /opt/venv/lib/python3.12/site-packages/lightning_fabric/utilities/cloud_io.py && \
+    sed -i "s/self.model = Pipeline.from_pretrained(model_config, token=token, cache_dir=cache_dir).to(device)/import os\n        if token:\n            os.environ['HF_TOKEN'] = token\n        self.model = Pipeline.from_pretrained(model_config, cache_dir=cache_dir).to(device)/g" /opt/venv/lib/python3.12/site-packages/whisperx/diarize.py && \
+    sed -i 's/token=token,/ /g' /opt/venv/lib/python3.12/site-packages/whisperx/vads/pyannote.py && \
+    sed -i "s/cache_dir: Union\[Path, Text, None\] = None,/cache_dir: Union\[Path, Text, None\] = None, \*\*kwargs,/g" /opt/venv/lib/python3.12/site-packages/pyannote/audio/pipelines/speaker_diarization.py
+
+# Environment Tuning for Strix Halo (gfx1151)
+ENV HSA_OVERRIDE_GFX_VERSION=11.5.1
+ENV AMDGPU_TARGETS=gfx1151
+ENV HSA_ENABLE_SDMA=0
+
+WORKDIR /app
+# We use paralin's advice: import torch/torchvision explicitly at the start
+ENTRYPOINT ["/opt/venv/bin/python3", "-c", "import torch; import torchvision; from whisperx.__main__ import cli; cli()"]

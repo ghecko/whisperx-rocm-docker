@@ -1,0 +1,33 @@
+services:
+  whisperx:
+    build:
+      context: .
+      dockerfile: Dockerfile.rocm
+    container_name: whisperx_rocm
+    # Use 'privileged' or specific device mappings for ROCm
+    # /dev/kfd is the global interface for ROCm compute
+    # /dev/dri contains the Direct Rendering Infrastructure nodes
+    devices:
+      - "/dev/kfd:/dev/kfd"
+      - "/dev/dri:/dev/dri"
+    group_add:
+      - video
+      - render
+    environment:
+      # Critical hardware overrides for gfx1151
+      - HSA_OVERRIDE_GFX_VERSION=11.5.1
+      - PYTORCH_ROCM_ARCH=gfx1151
+      - HIP_VISIBLE_DEVICES=0
+      # Helps with memory management on unified memory APUs
+      - HSA_XNACK=0 
+    volumes:
+      - ./audio:/app/audio
+      - ./output:/app/output
+      - whisperx_cache:/root/.cache
+    ports:
+      - "8200:8200"
+    # Ensure the container has enough shared memory for large model tensors
+    shm_size: '16gb' 
+
+volumes:
+  whisperx_cache:
