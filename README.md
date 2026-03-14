@@ -27,15 +27,18 @@ This repository builds a Docker container from `rocm/pytorch:rocm7.2_ubuntu24.04
 - Docker and Docker Compose installed.
 - A HuggingFace account with access granted to the `pyannote/speaker-diarization-community-1` model.
 
-### 2. Setup your HuggingFace Token
-Edit your `docker-compose.yml` or pass your HuggingFace API token as an environment variable to allow Pyannote to download the diarization model.
+### 1. Build the image
+The easiest way is to use `docker compose`. You can optionally bake the AI weights (Whisper Large-v3 and Pyannote community-1) directly into the image by passing your HuggingFace Token at build time. This allows the image to run completely offline without downloading models on startup.
 
-### 3. Build the Image
 ```bash
+# To build WITHOUT baking models (models will download on first run)
 docker compose build whisperx
+
+# To build WITH baked models (recommended for air-gapped or fast-start usage)
+docker compose build --build-arg HF_TOKEN="your_huggingface_token" whisperx
 ```
 
-### 4. Running a Transcription
+### 2. Prepare your directoriesption
 Place your audio files into the `audio/` directory.
 
 ```bash

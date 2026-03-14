@@ -73,8 +73,32 @@ RUN /opt/venv/bin/python3 -c "import torch; print(f'torch=={torch.__version__.sp
     onnxruntime-rocm \
     nltk \
     faster-whisper \
-    omegaconf \
-    git+https://github.com/m-bain/whisperX.git
+    omegaconf && \
+    /opt/venv/bin/python3 -m pip install -c /opt/constraints.txt --no-cache-dir --no-deps \
+    git+https://github.com/m-bain/whisperX.git && \
+    sed -i "s/self.model = Pipeline.from_pretrained(model_config, token=token, cache_dir=cache_dir).to(device)/import os\n        if token:\n            os.environ['HF_TOKEN'] = token\n        self.model = Pipeline.from_pretrained(model_config, cache_dir=cache_dir).to(device)/g" /opt/venv/lib/python3.12/site-packages/whisperx/diarize.py && \
+    sed -i 's/token=token,/ /g' /opt/venv/lib/python3.12/site-packages/whisperx/vads/pyannote.py && \
+    find /opt/venv/lib/python3.12/site-packages/pyannote -type f -name "*.py" -exec sed -i 's/use_auth_token/token/g' {} +
+
+# 3. Pre-download AI Models to bake them into the image
+# This requires passing --build-arg HF_TOKEN=... during docker compose build
+ARG HF_TOKEN
+ENV HF_TOKEN=${HF_TOKEN}
+RUN if [ -n "$HF_TOKEN" ]; then \
+        echo "HF_TOKEN provided, pre-downloading models..." && \
+        /opt/venv/bin/python3 -c "\
+import os;\
+from pyannote.audio.pipelines import SpeakerDiarization;\
+from whisperx.asr import load_model;\
+print('Downloading Whisper large-v3...');\
+load_model('large-v3', 'cpu', compute_type='float32');\
+print('Downloading Pyannote community-1...');\
+SpeakerDiarization.from_pretrained('pyannote/speaker-diarization-community-1', token=os.environ.get('HF_TOKEN'));\
+print('Models successfully baked into image!');\
+"; \
+    else \
+        echo "No HF_TOKEN provided during build, models will be downloaded at runtime instead."; \
+    fi
 
 # Environment Tuning for Strix Halo (gfx1151)
 ENV HSA_OVERRIDE_GFX_VERSION=11.5.1
